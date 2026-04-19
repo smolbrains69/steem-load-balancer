@@ -1,0 +1,285 @@
+name=src/transaction-handler.js
+import fetch from "node-fetch";
+import { log } from "./functions.js";
+
+/**
+ * TRON Transaction Handler
+ * Supports signing, building, and broadcasting transactions
+ */
+
+class TronTransactionHandler {
+  constructor(loadBalancerUrl = "http://localhost:9091") {
+    this.lbUrl = loadBalancerUrl;
+  }
+
+  /**
+   * Call TRON RPC through load balancer
+   */
+  async rpcCall(method, params = []) {
+    try {
+      const response = await fetch(this.lbUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method,
+          params,
+          id: 1,
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (data.error) {
+        throw new Error(`RPC Error: ${data.error.message}`);
+      }
+
+      return data.result;
+    } catch (error) {
+      log(`RPC Call Failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get account nonce for transaction signing
+   */
+  async getAccountNonce(address) {
+    try {
+      const nonce = await this.rpcCall("eth_getTransactionCount", [
+        address,
+        "pending",
+      ]);
+      return parseInt(nonce, 16);
+    } catch (error) {
+      log(`Failed to get nonce: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get gas price for transaction
+   */
+  async getGasPrice() {
+    try {
+      const gasPrice = await this.rpcCall("eth_gasPrice", []);
+      return gasPrice;
+    } catch (error) {
+      log(`Failed to get gas price: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Build transaction object
+   */
+  buildTransaction(config) {
+    const {
+      from,
+      to,
+      value = "0x0",
+      data = "0x",
+      gasLimit = "0x5208", // 21000 for ETH/TRON
+      gasPrice,
+      nonce,
+    } = config;
+
+    if (!from || !to) {
+      throw new Error("Missing required fields: from, to");
+    }
+
+    return {
+      from: this.normalizeAddress(from),
+      to: this.normalizeAddress(to),
+      value,
+      data,
+      gasLimit,
+      gasPrice,
+      nonce,
+      chainId: "0x1", // TRON mainnet
+    };
+  }
+
+  /**
+   * Estimate gas for transaction
+   */
+  async estimateGas(txData) {
+    try {
+      const estimate = await this.rpcCall("eth_estimateGas", [
+        {
+          from: txData.from,
+          to: txData.to,
+          value: txData.value,
+          data: txData.data,
+        },
+      ]);
+      return estimate;
+    } catch (error) {
+      log(`Gas estimation failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Sign transaction (requires private key - NEVER expose in production!)
+   */
+  signTransaction(txData, privateKey) {
+    try {
+      // SECURITY WARNING: This is for demonstration only!
+      // In production, use a secure key management service
+      log("⚠️ WARNING: Signing transaction with private key");
+
+      const { ethers } = require("ethers");
+      const wallet = new ethers.Wallet(privateKey);
+      
+      // Transaction will be signed
+      return wallet.signTransaction(txData);
+    } catch (error) {
+      log(`Transaction signing failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Send signed transaction to blockchain
+   */
+  async sendSignedTransaction(signedTx) {
+    try {
+      const txHash = await this.rpcCall("eth_sendRawTransaction", [signedTx]);
+      log(`Transaction sent: ${txHash}`);
+      return txHash;
+    } catch (error) {
+      log(`Failed to send transaction: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get transaction receipt
+   */
+  async getTransactionReceipt(txHash) {
+    try {
+      const receipt = await this.rpcCall("eth_getTransactionReceipt", [txHash]);
+      return receipt;
+    } catch (error) {
+      log(`Failed to get receipt: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Monitor transaction until confirmed
+   */
+  async waitForTransaction(txHash, maxAttempts = 30, interval = 2000) {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const receipt = await this.getTransactionReceipt(txHash);
+        
+        if (receipt && receipt.blockNumber) {
+          log(`✓ Transaction confirmed: ${txHash}`);
+          return receipt;
+        }
+
+        log(`Waiting for confirmation... (${i + 1}/${maxAttempts})`);
+        await new Promise((resolve) => setTimeout(resolve, interval));
+      } catch (error) {
+        log(`Check attempt ${i + 1} failed: ${error.message}`);
+      }
+    }
+
+    throw new Error(`Transaction not confirmed after ${maxAttempts} attempts`);
+  }
+
+  /**
+   * Get account balance
+   */
+  async getBalance(address) {
+    try {
+      const balance = await this.rpcCall("eth_getBalance", [address, "latest"]);
+      return balance;
+    } catch (error) {
+      log(`Failed to get balance: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Build transfer transaction
+   */
+  buildTransfer(config) {
+    const { from, to, amount, gasPrice, nonce } = config;
+
+    if (!from || !to || !amount) {
+      throw new Error("Missing required fields: from, to, amount");
+    }
+
+    return this.buildTransaction({
+      from,
+      to,
+      value: amount, // in wei
+      gasLimit: "0x5208", // Standard transfer
+      gasPrice,
+      nonce,
+    });
+  }
+
+  /**
+   * Build contract call transaction
+   */
+  buildContractCall(config) {
+    const { from, to, contractData, gasPrice, nonce, gasLimit } = config;
+
+    if (!from || !to || !contractData) {
+      throw new Error("Missing required fields: from, to, contractData");
+    }
+
+    return this.buildTransaction({
+      from,
+      to,
+      data: contractData, // Encoded contract call
+      value: "0x0",
+      gasLimit: gasLimit || "0x61a80", // Higher for contract calls
+      gasPrice,
+      nonce,
+    });
+  }
+
+  /**
+   * Normalize address format
+   */
+  normalizeAddress(address) {
+    if (!address.startsWith("0x")) {
+      return "0x" + address;
+    }
+    return address;
+  }
+
+  /**
+   * Get transaction by hash
+   */
+  async getTransaction(txHash) {
+    try {
+      const tx = await this.rpcCall("eth_getTransactionByHash", [txHash]);
+      return tx;
+    } catch (error) {
+      log(`Failed to get transaction: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get latest block
+   */
+  async getLatestBlock() {
+    try {
+      const blockNumber = await this.rpcCall("eth_blockNumber", []);
+      const block = await this.rpcCall("eth_getBlockByNumber", [blockNumber, true]);
+      return { blockNumber, block };
+    } catch (error) {
+      log(`Failed to get latest block: ${error.message}`);
+      throw error;
+    }
+  }
+}
+
+export { TronTransactionHandler };
